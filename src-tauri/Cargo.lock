@@ -3977,29 +3977,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtorrent"
-version = "0.1.9"
-dependencies = [
- "anyhow",
- "chrono",
- "dirs-next",
- "librqbit",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "thiserror 2.0.18",
- "tokio",
- "toml 0.8.2",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rfd"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4041,6 +4018,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7043b63bd0cd1aaa628e476b80e6d4023a3b50eb32789f2728908107bd0c793a"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "rtorrent"
+version = "0.1.9"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs-next",
+ "librqbit",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
