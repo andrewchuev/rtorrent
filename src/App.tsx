@@ -1,0 +1,492 @@
+import { Component, createSignal, createMemo, onMount, onCleanup, For, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
+import { listen } from "@tauri-apps/api/event";
+import {
+  getTorrents,
+  listTorrentMagnet,
+  listTorrentFile,
+  confirmAddTorrent,
+  cancelTorrentListing,
+  pauseTorrent,
+  resumeTorrent,
+  removeTorrent,
+  removeTorrentWithData,
+  TorrentInfo,
+  TorrentListing,
+  TorrentSource,
+} from "./lib/commands";
+import Toolbar from "./components/Toolbar";
+import TorrentRow from "./components/TorrentRow";
+import Sidebar, { StatusFilter } from "./components/Sidebar";
+import Settings from "./components/Settings";
+import DetailPanel from "./components/DetailPanel";
+import FileSelectionDialog from "./components/FileSelectionDialog";
+import { loadTheme, applyTheme, Theme } from "./lib/theme";
+import "./App.css";
+
+const ZOOM_LEVELS = [0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 2.5, 3.0];
+const DEFAULT_ZOOM_IDX = 3;
+
+type SortField = "name" | "size" | "progress" | "speed" | "status";
+type SortDir = "asc" | "desc";
+
+const STATUS_ORDER: Record<string, number> = {
+  downloading: 0,
+  initializing: 1,
+  seeding: 2,
+  paused: 3,
+  error: 4,
+};
+
+function torrentProgress(t: TorrentInfo): number {
+  if (t.size_bytes === 0) return 0;
+  return t.downloaded_bytes / t.size_bytes;
+}
+
+function torrentSpeed(t: TorrentInfo): number {
+  if (t.state.type === "downloading") return t.state.speed_down;
+  if (t.state.type === "seeding") return t.state.speed_up;
+  return 0;
+}
+
+const App: Component = () => {
+  const [theme, setTheme] = createSignal<Theme>(loadTheme());
+  applyTheme(theme());
+
+  const toggleTheme = () => {
+    const next: Theme = theme() === "dark" ? "light" : "dark";
+    applyTheme(next);
+    setTheme(next);
+  };
+
+  // createStore + reconcile: row components are never remounted on stats tick —
+  // only the specific reactive reads that changed trigger a fine-grained DOM update.
+  const [torrents, setTorrents] = createStore<TorrentInfo[]>([]);
+
+  const [showSettings, setShowSettings] = createSignal(false);
+  const [selectedId, setSelectedId] = createSignal<string | null>(null);
+  const [loading, setLoading] = createSignal(true);
+  const [dragging, setDragging] = createSignal(false);
+  const [dropError, setDropError] = createSignal("");
+  const [infoMsg, setInfoMsg] = createSignal("");
+  const [selectedIds, setSelectedIds] = createSignal<Set<string>>(new Set());
+  const [lastClickedId, setLastClickedId] = createSignal<string | null>(null);
+  const [sortField, setSortField] = createSignal<SortField>("name");
+  const [sortDir, setSortDir] = createSignal<SortDir>("asc");
+  const [statusFilter, setStatusFilter] = createSignal<StatusFilter>("all");
+  const [search, setSearch] = createSignal("");
+
+  // Torrent-add pipeline: every source (magnet, .torrent file/URL) is first
+  // "listed" (metadata resolved, no download started) so the user can pick which
+  // files to download in FileSelectionDialog before confirming. Sources are
+  // queued so drag-dropping several .torrent files shows the dialogs one at a time.
+  const [pendingListing, setPendingListing] = createSignal<TorrentListing | null>(null);
+  const [listingBusy, setListingBusy] = createSignal(false);
+  const [listingError, setListingError] = createSignal("");
+  let addQueue: TorrentSource[] = [];
+
+  const savedZoom = parseInt(localStorage.getItem("zoom-idx") ?? String(DEFAULT_ZOOM_IDX));
+  const [zoomIdx, setZoomIdx] = createSignal(
+    isNaN(savedZoom) ? DEFAULT_ZOOM_IDX : Math.max(0, Math.min(savedZoom, ZOOM_LEVELS.length - 1))
+  );
+
+  const zoom = () => ZOOM_LEVELS[zoomIdx()];
+  const zoomIn    = () => setZoomIdx(i => Math.min(i + 1, ZOOM_LEVELS.length - 1));
+  const zoomOut   = () => setZoomIdx(i => Math.max(i - 1, 0));
+  const zoomReset = () => setZoomIdx(DEFAULT_ZOOM_IDX);
+
+  const applyZoom = () => {
+    const z = zoom();
+    (document.documentElement.style as any).zoom = String(z);
+    // Compensate height: at zoom != 1, 100vh is in unzoomed px.
+    // Setting height to (100/z)vh ensures the app visually fills the window.
+    const appEl = document.querySelector<HTMLElement>(".app");
+    if (appEl) appEl.style.height = `${(100 / z).toFixed(4)}vh`;
+    localStorage.setItem("zoom-idx", String(zoomIdx()));
+  };
+  applyZoom();
+
+  const handleSort = (field: SortField) => {
+    if (sortField() === field) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+  };
+
+  const selectedTorrent = createMemo(() =>
+    torrents.find(t => t.id === selectedId()) ?? null
+  );
+
+  const sortedTorrents = createMemo(() => {
+    const list = [...torrents];
+    const dir = sortDir() === "asc" ? 1 : -1;
+    const field = sortField();
+    list.sort((a, b) => {
+      switch (field) {
+        case "name":     return dir * a.name.localeCompare(b.name);
+        case "size":     return dir * (a.size_bytes - b.size_bytes);
+        case "progress": return dir * (torrentProgress(a) - torrentProgress(b));
+        case "speed":    return dir * (torrentSpeed(a) - torrentSpeed(b));
+        case "status": {
+          const oa = STATUS_ORDER[a.state.type] ?? 9;
+          const ob = STATUS_ORDER[b.state.type] ?? 9;
+          return dir * (oa - ob) || a.name.localeCompare(b.name);
+        }
+      }
+    });
+    return list;
+  });
+
+  const filteredTorrents = createMemo(() => {
+    const status = statusFilter();
+    const q = search().trim().toLowerCase();
+    return sortedTorrents().filter((t) => {
+      if (status === "downloading" && t.state.type !== "downloading" && t.state.type !== "initializing") return false;
+      if (status === "seeding" && t.state.type !== "seeding") return false;
+      if (status === "completed" && !(t.size_bytes > 0 && t.downloaded_bytes >= t.size_bytes)) return false;
+      if (q && !t.name.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  });
+
+  // ── Add pipeline: list → (user picks files in dialog) → confirm ──────────
+
+  const processNext = async () => {
+    const source = addQueue.shift();
+    if (!source) return;
+    setListingBusy(true);
+    setListingError("");
+    try {
+      const listing =
+        source.kind === "magnet" ? await listTorrentMagnet(source.value) : await listTorrentFile(source.path);
+      setPendingListing(listing);
+    } catch (e) {
+      setListingError(String(e));
+    } finally {
+      setListingBusy(false);
+    }
+  };
+
+  const enqueueAdd = (source: TorrentSource) => {
+    addQueue.push(source);
+    if (!pendingListing() && !listingBusy() && !listingError()) {
+      processNext();
+    }
+  };
+
+  const handleConfirmSelection = async (fileIndices: number[] | null) => {
+    const listing = pendingListing();
+    if (!listing) return;
+    setPendingListing(null);
+    try {
+      const torrent = await confirmAddTorrent(listing.info_hash, fileIndices);
+      handleAdded(torrent);
+    } catch (e) {
+      setDropError(String(e));
+      setTimeout(() => setDropError(""), 4000);
+    }
+    processNext();
+  };
+
+  const handleCancelSelection = () => {
+    const listing = pendingListing();
+    setPendingListing(null);
+    setListingError("");
+    if (listing) cancelTorrentListing(listing.info_hash).catch(() => {});
+    processNext();
+  };
+
+  const handleKeyDown = async (e: KeyboardEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === "=" || e.key === "+") { e.preventDefault(); zoomIn(); applyZoom(); }
+      if (e.key === "-")  { e.preventDefault(); zoomOut(); applyZoom(); }
+      if (e.key === "0")  { e.preventDefault(); zoomReset(); applyZoom(); }
+
+      if (e.key === "v") {
+        const tag = (document.activeElement as HTMLElement)?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        e.preventDefault();
+        try {
+          const text = (await navigator.clipboard.readText()).trim();
+          if (text.startsWith("magnet:") || text.startsWith("http://") || text.startsWith("https://")) {
+            enqueueAdd({ kind: "magnet", value: text });
+          }
+        } catch {
+          // clipboard empty or denied — ignore silently
+        }
+      }
+    }
+  };
+
+  const handleDroppedPaths = (paths: string[]) => {
+    const torrentPaths = paths.filter(p => p.toLowerCase().endsWith(".torrent"));
+    if (torrentPaths.length === 0) {
+      setDropError("Only .torrent files are supported");
+      setTimeout(() => setDropError(""), 3000);
+      return;
+    }
+    for (const path of torrentPaths) {
+      enqueueAdd({ kind: "file", path });
+    }
+  };
+
+  onMount(async () => {
+    applyZoom(); // correct .app height after DOM is rendered
+    window.addEventListener("keydown", handleKeyDown);
+
+    try {
+      const list = await getTorrents();
+      setTorrents(reconcile(list, { key: "id", merge: true }));
+    } catch (e) {
+      console.error("Failed to load torrents:", e);
+    } finally {
+      setLoading(false);
+    }
+
+    // Stats arrive as TorrentInfo[]. reconcile merges by id so existing store
+    // items keep their identity → <For> never remounts rows, only reactive reads
+    // inside the row update (no flickering).
+    const unlistenStats = await listen<TorrentInfo[]>("torrent-stats", (event) => {
+      setTorrents(reconcile(event.payload, { key: "id", merge: true }));
+    });
+
+    const unlistenEnter = await listen("tauri://drag-enter", () => setDragging(true));
+    const unlistenLeave = await listen("tauri://drag-leave", () => setDragging(false));
+    const unlistenDrop  = await listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
+      setDragging(false);
+      handleDroppedPaths(event.payload.paths);
+    });
+
+    const unlistenOpenFile = await listen<string>("open-torrent-file", (event) => {
+      enqueueAdd({ kind: "file", path: event.payload });
+    });
+
+    onCleanup(() => {
+      unlistenStats();
+      unlistenEnter();
+      unlistenLeave();
+      unlistenDrop();
+      unlistenOpenFile();
+      window.removeEventListener("keydown", handleKeyDown);
+    });
+  });
+
+  const handleAdded = (torrent: TorrentInfo) => {
+    if (torrents.some(t => t.id === torrent.id)) {
+      setInfoMsg(`"${torrent.name}" is already in the queue`);
+      setTimeout(() => setInfoMsg(""), 4000);
+    } else {
+      setTorrents(reconcile([torrent, ...torrents], { key: "id", merge: true }));
+    }
+    setSelectedId(torrent.id);
+  };
+
+  const handleUpdate = (id: string, patch: Partial<TorrentInfo>) => {
+    const idx = torrents.findIndex(t => t.id === id);
+    if (idx >= 0) setTorrents(idx, patch as any);
+  };
+
+  const handleRemove = (id: string) => {
+    setTorrents(reconcile(torrents.filter(t => t.id !== id), { key: "id", merge: true }));
+    if (selectedId() === id) setSelectedId(null);
+    setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n; });
+  };
+
+  // Row selection: plain click replaces the selection; Ctrl/Cmd toggles this row
+  // in the existing selection; Shift selects the contiguous range from the last
+  // clicked row (anchor stays put across repeated shift-clicks). The detail panel
+  // always follows whichever row was clicked most recently, regardless of modifier.
+  const handleRowClick = (torrent: TorrentInfo, e: MouseEvent) => {
+    const id = torrent.id;
+    if (e.shiftKey && lastClickedId()) {
+      const ids = sortedTorrents().map(t => t.id);
+      const a = ids.indexOf(lastClickedId()!);
+      const b = ids.indexOf(id);
+      if (a !== -1 && b !== -1) {
+        const [start, end] = a < b ? [a, b] : [b, a];
+        setSelectedIds(new Set(ids.slice(start, end + 1)));
+      } else {
+        setSelectedIds(new Set([id]));
+      }
+    } else if (e.ctrlKey || e.metaKey) {
+      setSelectedIds(prev => {
+        const n = new Set(prev);
+        if (n.has(id)) n.delete(id); else n.add(id);
+        return n;
+      });
+      setLastClickedId(id);
+    } else {
+      setSelectedIds(new Set([id]));
+      setLastClickedId(id);
+    }
+    setSelectedId(id);
+  };
+
+  const handleSelectAll   = () => setSelectedIds(new Set(torrents.map(t => t.id)));
+  const handleDeselectAll = () => setSelectedIds(new Set<string>());
+
+  const handleGroupAction = async (action: "start" | "pause" | "stop" | "remove" | "remove-with-data") => {
+    const ids = [...selectedIds()];
+    for (const id of ids) {
+      try {
+        switch (action) {
+          case "start":
+            await resumeTorrent(id);
+            handleUpdate(id, { state: { type: "initializing" } });
+            break;
+          case "pause":
+          case "stop":
+            await pauseTorrent(id);
+            handleUpdate(id, { state: { type: "paused" } });
+            break;
+          case "remove":
+            await removeTorrent(id);
+            handleRemove(id);
+            break;
+          case "remove-with-data":
+            await removeTorrentWithData(id);
+            handleRemove(id);
+            break;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    setSelectedIds(new Set<string>());
+  };
+
+  const HeaderCell: Component<{ field: SortField; label: string; class: string }> = (p) => (
+    <button class={`table-header-cell ${p.class}`} onClick={() => handleSort(p.field)}>
+      {p.label}
+      <Show when={sortField() === p.field}>
+        <span class="sort-arrow">{sortDir() === "asc" ? "↑" : "↓"}</span>
+      </Show>
+    </button>
+  );
+
+  const allSelected = createMemo(() => torrents.length > 0 && selectedIds().size === torrents.length);
+
+  return (
+    <div class="app">
+      <div class="app-body">
+        <Sidebar
+          torrents={torrents}
+          filter={statusFilter()}
+          onFilterChange={setStatusFilter}
+          onOpenSettings={() => setShowSettings(true)}
+        />
+        <Show when={showSettings()}>
+          <Settings onClose={() => setShowSettings(false)} />
+        </Show>
+
+        <div class="main-area">
+          <Toolbar
+            onAddSource={enqueueAdd}
+            theme={theme()}
+            onToggleTheme={toggleTheme}
+            selectedCount={selectedIds().size}
+            onGroupAction={handleGroupAction}
+            search={search()}
+            onSearchChange={setSearch}
+          />
+
+          <div class="table-header">
+            <div class="table-header-cell table-header-name">
+              <input
+                type="checkbox"
+                class="table-header-checkbox"
+                checked={allSelected()}
+                disabled={torrents.length === 0}
+                onClick={(e) => { e.stopPropagation(); allSelected() ? handleDeselectAll() : handleSelectAll(); }}
+              />
+              <HeaderCell field="name" label="Name" class="table-header-name-label" />
+            </div>
+            <HeaderCell field="size" label="Size" class="table-header-size" />
+            <HeaderCell field="speed" label="Down / Up" class="table-header-speed" />
+            <div class="table-header-cell table-header-eta">ETA</div>
+            <HeaderCell field="progress" label="Progress" class="table-header-progress" />
+          </div>
+
+          <div class="torrent-list">
+            <Show when={!loading()} fallback={<div class="empty-state">Loading...</div>}>
+              <Show
+                when={filteredTorrents().length > 0}
+                fallback={
+                  <div class="empty-state">
+                    <div class="empty-icon">⬇</div>
+                    <div class="empty-title">No torrents yet</div>
+                    <div class="empty-desc">
+                      {torrents.length === 0
+                        ? 'Click "Add Link", "Add File", or drop a .torrent file here'
+                        : "No torrents match the current filter"}
+                    </div>
+                  </div>
+                }
+              >
+                <For each={filteredTorrents()}>
+                  {(torrent) => (
+                    <TorrentRow
+                      torrent={torrent}
+                      selected={selectedIds().has(torrent.id)}
+                      onSelect={(e) => handleRowClick(torrent, e)}
+                    />
+                  )}
+                </For>
+              </Show>
+            </Show>
+          </div>
+
+          <Show when={selectedTorrent() !== null}>
+            <DetailPanel torrent={selectedTorrent()!} />
+          </Show>
+        </div>
+      </div>
+
+      <div class="statusbar">
+        <Show when={dropError()}>
+          <span class="statusbar-error">{dropError()}</span>
+        </Show>
+        <Show when={!dropError() && infoMsg()}>
+          <span class="statusbar-info">{infoMsg()}</span>
+        </Show>
+        <Show when={!dropError() && !infoMsg()}>
+          <span>
+            <Show when={selectedIds().size > 0}>{selectedIds().size} selected · </Show>
+            {torrents.length} torrent{torrents.length !== 1 ? "s" : ""}
+          </span>
+        </Show>
+        <span class="statusbar-spacer" />
+        <div class="zoom-controls">
+          <button class="zoom-btn" onClick={() => { zoomOut(); applyZoom(); }} disabled={zoomIdx() === 0} title="Zoom out (Ctrl+-)">−</button>
+          <button class="zoom-label" onClick={() => { zoomReset(); applyZoom(); }} title="Reset zoom (Ctrl+0)">
+            {Math.round(zoom() * 100)}%
+          </button>
+          <button class="zoom-btn" onClick={() => { zoomIn(); applyZoom(); }} disabled={zoomIdx() === ZOOM_LEVELS.length - 1} title="Zoom in (Ctrl+=)">+</button>
+        </div>
+      </div>
+
+      <Show when={dragging()}>
+        <div class="drop-overlay">
+          <div class="drop-hint">
+            <div class="drop-icon">⬇</div>
+            <div class="drop-text">Drop .torrent file to add</div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={listingBusy() || pendingListing() !== null || listingError()}>
+        <FileSelectionDialog
+          listing={pendingListing()}
+          loading={listingBusy()}
+          error={listingError()}
+          onConfirm={handleConfirmSelection}
+          onCancel={handleCancelSelection}
+        />
+      </Show>
+    </div>
+  );
+};
+
+export default App;

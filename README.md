@@ -1,0 +1,168 @@
+# rtorrent
+
+A lightweight, cross-platform BitTorrent client built with **Rust + Tauri 2** and a **SolidJS** frontend.
+
+[![Download](https://img.shields.io/github/v/release/andrewchuev/rtorrent?label=Download&style=for-the-badge&color=2563eb&labelColor=333333)](https://github.com/andrewchuev/rtorrent/releases/latest)
+
+---
+
+## Features
+
+- **Magnet links & .torrent files** — add torrents by URL, file picker, drag & drop, or paste from clipboard (`Ctrl+V` global shortcut)
+- **Choose what to download** — every add resolves the torrent's metadata first and shows a file/folder tree so you can pick exactly what to grab, with per-folder toggling and Check All / Uncheck All
+- **Real-time stats** — download/upload speed, progress, and peer count updated every second, with a live speed chart
+- **Resizable detail panel** — drag to resize, per-file progress bars, active peer list, and the speed chart for the selected torrent
+- **Multi-select** — Shift/Ctrl+click to select multiple torrents; bulk start/pause/stop/remove actions always available
+- **System tray** — runs in the background; hide to tray on close, re-open with a click or tray icon double-click
+- **Download-complete notifications** — desktop notification when a torrent finishes
+- **Settings** — configurable download folder, speed limits, and startup behavior (persisted to TOML)
+- **Sort, zoom & theme** — sort by name, status, progress, speed or size; UI zoom via Ctrl +/−/0; dark/light theme toggle
+- **DHT** — decentralised peer discovery, no tracker required for magnet links
+
+---
+
+## Screenshots
+
+> *Coming soon — contributions welcome!*
+
+---
+
+## Installation
+
+Download the latest release for your platform from the [Releases](https://github.com/andrewchuev/rtorrent/releases) page:
+
+| Platform | File |
+|----------|------|
+| Windows  | `rtorrent_x.x.x_x64-setup.exe` or `.msi` |
+| macOS    | `rtorrent_x.x.x_universal.dmg` (Intel + Apple Silicon) |
+| Linux    | `rtorrent_x.x.x_amd64.AppImage` or `.deb` |
+
+### Notes
+
+- **macOS:** If you see *"unidentified developer"* — right-click the `.app` → **Open**.
+- **Windows:** SmartScreen may warn about an unknown publisher — click **More info → Run anyway**.
+- **Linux AppImage:** `chmod +x rtorrent_*.AppImage && ./rtorrent_*.AppImage`
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Desktop shell | [Tauri 2](https://tauri.app) |
+| Backend / business logic | Rust (stable) |
+| BitTorrent engine | [librqbit 9](https://github.com/ikatson/rqbit) |
+| Frontend | [SolidJS](https://solidjs.com) + TypeScript |
+| Frontend build | [Vite](https://vitejs.dev) |
+| Config persistence | TOML (`~/.config/rtorrent/settings.toml`) |
+
+---
+
+## Building from Source
+
+### Prerequisites
+
+- [Rust](https://rustup.rs) stable toolchain
+- [Node.js](https://nodejs.org) LTS
+- Platform system libraries:
+
+  **Ubuntu / Debian:**
+  ```bash
+  sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+  ```
+
+  **macOS:** Xcode Command Line Tools (`xcode-select --install`)
+
+  **Windows:** [Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) + [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 11)
+
+### Run in development
+
+```bash
+git clone https://github.com/andrewchuev/rtorrent.git
+cd rtorrent
+npm install
+npm run tauri dev
+```
+
+### Build release binary
+
+```bash
+npm run tauri build
+```
+
+Output is in `src-tauri/target/release/bundle/`.
+
+---
+
+## Release Process
+
+Releases are built automatically by GitHub Actions for all three platforms whenever a version tag is pushed:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow produces a Draft GitHub Release with all platform installers attached.
+
+---
+
+## Project Structure
+
+```
+rtorrent/
+├── src/                        # SolidJS frontend
+│   ├── App.tsx                 # Root component, layout, drag-drop, sorting, add-torrent pipeline
+│   ├── lib/
+│   │   ├── commands.ts         # Typed Tauri IPC wrappers
+│   │   ├── theme.ts            # Dark/light theme persistence
+│   │   └── format.ts           # Byte size / speed / ETA formatting helpers
+│   └── components/
+│       ├── Toolbar.tsx         # Add torrent, open file, paste link
+│       ├── TorrentRow.tsx      # Single torrent list item
+│       ├── DetailPanel.tsx     # Resizable panel: per-file progress, peers, speed chart
+│       ├── FileSelectionDialog.tsx  # Pick files/folders before a torrent starts downloading
+│       └── Settings.tsx        # Settings modal
+└── src-tauri/                  # Rust backend
+    └── src/
+        ├── lib.rs              # App setup, tray, background stats emitter
+        ├── engine/
+        │   └── manager.rs      # TorrentManager wrapping librqbit Session
+        ├── commands/
+        │   ├── torrent.rs      # Tauri commands: list/confirm/cancel add, pause, resume, remove, details
+        │   └── settings.rs     # Tauri commands: get/save settings + TOML I/O
+        └── error.rs            # AppError with Tauri-serializable impl
+```
+
+---
+
+## Roadmap
+
+- [ ] Tracker list tab in detail panel
+- [ ] Sequential download mode for streaming
+- [ ] RSS feed / auto-download rules
+- [ ] Code signing for Windows & macOS releases
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. For significant changes please open an issue first to discuss the approach.
+
+CI runs formatting, lint, and tests on every push/PR ([.github/workflows/ci.yml](.github/workflows/ci.yml)); the same checks locally:
+
+```bash
+# Frontend: type check
+npx tsc --noEmit
+
+# Rust: format, lint, test
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.
