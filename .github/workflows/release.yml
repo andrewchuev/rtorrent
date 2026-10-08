@@ -86,7 +86,7 @@ jobs:
 
             > **Note:** On macOS, if you see "unidentified developer" — right-click the app → Open.
             > On Windows, SmartScreen may warn about unknown publisher — click "More info" → Run anyway.
-          releaseDraft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || true }}
+          releaseDraft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft }}
           prerelease: false
           retryAttempts: 3
           args: ${{ matrix.args }}
