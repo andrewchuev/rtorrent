@@ -24,8 +24,15 @@ import FileSelectionDialog from "./components/FileSelectionDialog";
 import { loadTheme, applyTheme, Theme } from "./lib/theme";
 import "./App.css";
 
-const ZOOM_LEVELS = [0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 2.5, 3.0];
-const DEFAULT_ZOOM_IDX = 3;
+const ZOOM_MIN_PCT = 70;
+const ZOOM_MAX_PCT = 300;
+const ZOOM_STEP_PCT = 10;
+// Integer percents divided at the end avoid float drift from repeated 0.1 additions.
+const ZOOM_LEVELS = Array.from(
+  { length: (ZOOM_MAX_PCT - ZOOM_MIN_PCT) / ZOOM_STEP_PCT + 1 },
+  (_, i) => (ZOOM_MIN_PCT + i * ZOOM_STEP_PCT) / 100,
+);
+const DEFAULT_ZOOM_IDX = ZOOM_LEVELS.indexOf(1);
 
 type SortField = "name" | "size" | "progress" | "speed" | "status";
 type SortDir = "asc" | "desc";
