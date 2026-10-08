@@ -1,6 +1,6 @@
 {
   "productName": "rtorrent",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "identifier": "com.andrewchuev.rtorrent",
   "build": {
     "frontendDist": "../dist",
